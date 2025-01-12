@@ -32,10 +32,10 @@ const uint8_t DRIVER_STBY = 5;                                // Motor driver ST
 const char* SERVICE_UUID = "a16587d4-584a-4668-b279-6ccb940cdfd0";
 const char* CHARACTERISTIC_UUID_TX = "a16587d4-584a-4668-b279-6ccb940cdfd1";
 const char* CHARACTERISTIC_UUID_RX = "a16587d4-584a-4668-b279-6ccb940cdfd2";
-const char* ACCELX_UUID_RX = "a16587d4-584a-4668-b279-6ccb940cdfd3";
-const char* ACCELY_UUID_RX = "a16587d4-584a-4668-b279-6ccb940cdfd4";
+const char* CTLVAL1_UUID_RX = "a16587d4-584a-4668-b279-6ccb940cdfd3";
+const char* CTLVAL2_UUID_RX = "a16587d4-584a-4668-b279-6ccb940cdfd4";
 BLEServer* Server = NULL;
-BLECharacteristic *CharTX, *CharRX, *CharAccelX, *CharAccelY;
+BLECharacteristic *CharTX, *CharRX, *CharCtlVal1, *CharCtlVal2;
 bool dev_connected = false;
 bool last_dev_connected = false;
 String tx_idle = "";
@@ -129,24 +129,24 @@ void setup() {
   CharRX->addDescriptor(new BLE2902());
 
   // BLEChar for accelerometer X
-  CharAccelX = Service->createCharacteristic(
-    ACCELX_UUID_RX,
+  CharCtlVal1 = Service->createCharacteristic(
+    CTLVAL1_UUID_RX,
     BLECharacteristic::PROPERTY_READ | 
     BLECharacteristic::PROPERTY_WRITE
   );
-  CharAccelX->addDescriptor(new BLE2902());
+  CharCtlVal1->addDescriptor(new BLE2902());
 
   // BLEChar for accelerometer Y
-  BLECharacteristic *CharAccelY = Service->createCharacteristic(
-    ACCELY_UUID_RX,
+  CharCtlVal2 = Service->createCharacteristic(
+    CTLVAL2_UUID_RX,
     BLECharacteristic::PROPERTY_READ | 
     BLECharacteristic::PROPERTY_WRITE
   );
-  CharAccelY->addDescriptor(new BLE2902());
+  CharCtlVal2->addDescriptor(new BLE2902());
   
   CharRX->setCallbacks(new CommandCallbacks());
-  CharAccelX->setCallbacks(new AccelXCallbacks());
-  CharAccelY->setCallbacks(new AccelYCallbacks());
+  CharCtlVal1->setCallbacks(new AccelXCallbacks());
+  CharCtlVal2->setCallbacks(new AccelYCallbacks());
 
   Service->start();
   Server->getAdvertising()->start();
