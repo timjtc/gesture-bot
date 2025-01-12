@@ -4,14 +4,12 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
-#include <ReactESP.h>
 #include <SparkFun_TB6612.h>
 
 Preferences NVS;
 
 // Function prototypes
 void parseCommand(String command);
-void setLedMode(uint8_t mode);
 void sendTelemetry();
 void motorDrive(int left, int right);
 
@@ -29,16 +27,21 @@ const uint8_t DRIVER_STBY = 5;                                // Motor driver ST
   0, //2, //4, //5, 12, //13, 14, //15, 18, 19, 21, //22, //23, //25, //26, //27, //32, //33
 */
 
-// BLE setup
+// BLE set
+// static BLEUUID BLESERVICE_UUID("b3ca43e4-a9df-442d-898b-697d166a5140");
 const char* SERVICE_UUID = "a16587d4-584a-4668-b279-6ccb940cdfd0";
 const char* CHARACTERISTIC_UUID_TX = "a16587d4-584a-4668-b279-6ccb940cdfd1";
 const char* CHARACTERISTIC_UUID_RX = "a16587d4-584a-4668-b279-6ccb940cdfd2";
+const char* ACCELX_UUID_RX = "a16587d4-584a-4668-b279-6ccb940cdfd3";
+const char* ACCELY_UUID_RX = "a16587d4-584a-4668-b279-6ccb940cdfd4";
 BLEServer* Server = NULL;
-BLECharacteristic *CharTX, *CharRX;
+BLECharacteristic *CharTX, *CharRX, *CharAccelX, *CharAccelY;
 bool dev_connected = false;
 bool last_dev_connected = false;
 String tx_idle = "";
 String tx_drive = "";
+int accel_ctl_left = 0;
+int accel_ctl_right = 0;
 
 // Motor setup
 const int offset_motorA = 1;
@@ -56,11 +59,6 @@ int arm_motor = false;
 
 int left_motor = 0;
 int right_motor = 0;
-
-// Blinker setup
-EventLoop LEDQtrCalBlinker;
-EventLoop LEDActiveBlinker;
-EventLoop LEDIdleBlinker;
 
 class ServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer* pServer) {
@@ -81,6 +79,24 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
   }
 };
 
+class AccelXCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) {
+    std::string rx_value = pCharacteristic->getValue();
+    if (rx_value.length() > 0) {
+      accel_ctl_left = atoi(rx_value.c_str());
+    }
+  }
+};
+
+class AccelYCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) {
+    std::string rx_value = pCharacteristic->getValue();
+    if (rx_value.length() > 0) {
+      accel_ctl_right = atoi(rx_value.c_str());
+    }
+  }
+};
+
 void setup() {
 
   // Initialize serial and pin modes
@@ -88,21 +104,7 @@ void setup() {
   pinMode(LED, OUTPUT);
 
   // Load data
-  NVS.begin("lfav", false);
-
-  // Initialize blinkers
-  LEDQtrCalBlinker.onRepeat(100, [] () {
-      static bool state = false;
-      digitalWrite(LED, state = !state);
-  });
-  LEDActiveBlinker.onRepeat(250, [] () {
-      static bool state = false;
-      digitalWrite(LED, state = !state);
-  });
-  LEDIdleBlinker.onRepeat(500, [] () {
-      static bool state = false;
-      digitalWrite(LED, state = !state);
-  });
+  NVS.begin("gesturebot", false);
 
   BLEDevice::init("GestureBot");
 
@@ -116,6 +118,7 @@ void setup() {
     CHARACTERISTIC_UUID_TX,
     BLECharacteristic::PROPERTY_NOTIFY
   );
+  CharTX->addDescriptor(new BLE2902());
 
   // BLEChar for receiving commands
   CharRX = Service->createCharacteristic(
@@ -123,10 +126,28 @@ void setup() {
     BLECharacteristic::PROPERTY_READ | 
     BLECharacteristic::PROPERTY_WRITE
   );
-
-  CharRX->setCallbacks(new CommandCallbacks());
-  CharTX->addDescriptor(new BLE2902());
   CharRX->addDescriptor(new BLE2902());
+
+  // BLEChar for accelerometer X
+  CharAccelX = Service->createCharacteristic(
+    ACCELX_UUID_RX,
+    BLECharacteristic::PROPERTY_READ | 
+    BLECharacteristic::PROPERTY_WRITE
+  );
+  CharAccelX->addDescriptor(new BLE2902());
+
+  // BLEChar for accelerometer Y
+  BLECharacteristic *CharAccelY = Service->createCharacteristic(
+    ACCELY_UUID_RX,
+    BLECharacteristic::PROPERTY_READ | 
+    BLECharacteristic::PROPERTY_WRITE
+  );
+  CharAccelY->addDescriptor(new BLE2902());
+  
+  CharRX->setCallbacks(new CommandCallbacks());
+  CharAccelX->setCallbacks(new AccelXCallbacks());
+  CharAccelY->setCallbacks(new AccelYCallbacks());
+
   Service->start();
   Server->getAdvertising()->start();
   Serial.println("Waiting for a client connection...");
@@ -141,11 +162,9 @@ void loop() {
 
   // On connect
   if (dev_connected) {
-    
-    setLedMode(mode);
 
     if (mode == MODE_DRIVE) {
-      pidLineFollow();
+      motorDrive(accel_ctl_left, accel_ctl_right);
       sendTelemetry();
     }
 
@@ -224,21 +243,13 @@ void sendTelemetry() {
     CharTX->notify();
   } else if (mode == MODE_DRIVE) {
     tx_drive = String(mode) + "," + 
-                String(arm_motor) + "," + 
-                String(speed_limit);
+               String(arm_motor) + "," + 
+               String(speed_limit) + "," +
+               String(left_motor) + "," +
+               String(right_motor);
       CharTX->setValue(tx_drive.c_str());
       CharTX->notify();
   }
-}
-
-void setLedMode(uint8_t mode) {
-
-  if (mode == MODE_IDLE) {
-    LEDIdleBlinker.tick();
-  } else if (mode == MODE_DRIVE) {
-    LEDQtrCalBlinker.tick();
-  }
-
 }
 
 void motorDrive(int left, int right) {
