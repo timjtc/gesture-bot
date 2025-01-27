@@ -76,7 +76,7 @@ bool connectToServer() {
   Serial.print("Forming a connection to ");
   Serial.println(BLEAdvDevice->getAddress().toString().c_str());
   
-  BLEClient*  pClient  = BLEDevice::createClient();
+  BLEClient* pClient  = BLEDevice::createClient();
   Serial.println(" - Created client");
 
   pClient->setClientCallbacks(new MyClientCallback());
