@@ -8,6 +8,9 @@
 #include <vector>
 #include <string>
 
+void parseInput(const std::string& input);
+bool connectToServer(BLEAddress pAddress);
+
 // Pin definitions
 const uint8_t LED = 2;                                  // Onboard LED, don't connect to anything
 const uint8_t MPU_SCL = 22;                             // accelerometer SCL
