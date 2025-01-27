@@ -3,12 +3,7 @@
 #include <Adafruit_Sensor.h>
 #include <Wire.h>
 #include <BLEDevice.h>
-#include <iostream>
-#include <sstream>
-#include <vector>
-#include <string>
 
-void parseInput(const std::string& input);
 bool connectToServer(BLEAddress pAddress);
 bool connectCharacteristic(BLERemoteService* pRemoteService, BLERemoteCharacteristic* l_BLERemoteChar);
 
@@ -308,30 +303,4 @@ void loop() {
 
   // Serial.println("");
   // delay(100);
-}
-
-void parseInput(const std::string& input) {
-    std::vector<int> values;
-    std::stringstream ss(input);
-    std::string item;
-
-    while (std::getline(ss, item, ',')) {
-        values.push_back(std::stoi(item));
-    }
-
-    mode = values[0];
-    arm_motor = 0;
-    speed_limit = 0;
-    left_motor = 0;
-    right_motor = 0;
-
-    if (mode == 1) {
-        arm_motor = values[1];
-        speed_limit = values[2];
-    } else if (mode == 2) {
-        arm_motor = values[1];
-        speed_limit = values[2];
-        left_motor = values[3];
-        right_motor = values[4];
-    }
 }
