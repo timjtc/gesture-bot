@@ -1,306 +1,267 @@
 #include <Arduino.h>
-#include <Adafruit_MPU6050.h>
-#include <Adafruit_Sensor.h>
-#include <Wire.h>
+#include <Preferences.h>
 #include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+#include <SparkFun_TB6612.h>
 
-bool connectToServer(BLEAddress pAddress);
-bool connectCharacteristic(BLERemoteService* pRemoteService, BLERemoteCharacteristic* l_BLERemoteChar);
+Preferences NVS;
+
+// Function prototypes
+void parseCommand(String command);
+void sendTelemetry();
+void motorDrive(int left, int right);
 
 // Pin definitions
-const uint8_t LED = 2;                                  // Onboard LED, don't connect to anything
-const uint8_t MPU_SCL = 22;                             // accelerometer SCL
-const uint8_t MPU_SDA = 21;                             // accelerometer SDA
+const uint8_t LED = 2;                                        // Onboard LED, don't connect to anything
+const uint8_t DRIVER_AIN1 = 17;                               // Motor driver AI1
+const uint8_t DRIVER_BIN1 = 18;                               // Motor driver BI1
+const uint8_t DRIVER_AIN2 = 16;                               // Motor driver AI2
+const uint8_t DRIVER_BIN2 = 19;                               // Motor driver BI2
+const uint8_t DRIVER_PWMA = 4;                                // Motor driver PWMA
+const uint8_t DRIVER_PWMB = 21;                               // Motor driver PWMB
+const uint8_t DRIVER_STBY = 5;                                // Motor driver STBY
+/*
+  Available pins in ESP32:
+  0, //2, //4, //5, 12, //13, 14, //15, 18, 19, 21, //22, //23, //25, //26, //27, //32, //33
+*/
 
-// BLE settings
-#define BLEServerName "GestureBot"
-static BLEUUID SERVICE_UUID("a16587d4-584a-4668-b279-6ccb940cdfd0");
-static BLEUUID TELEMETRY_CHARUUID("a16587d4-584a-4668-b279-6ccb940cdfd1");
-static BLEUUID CMDSTR_CHARUUID("a16587d4-584a-4668-b279-6ccb940cdfd2");
-static BLEUUID CTLVAL1_CHARUUID("a16587d4-584a-4668-b279-6ccb940cdfd3");
-static BLEUUID CTLVAL2_CHARUUID("a16587d4-584a-4668-b279-6ccb940cdfd4");
-static BLEAddress *pServerAddress;
+// BLE set
+// static BLEUUID BLESERVICE_UUID("b3ca43e4-a9df-442d-898b-697d166a5140");
+const char* SERVICE_UUID = "a16587d4-584a-4668-b279-6ccb940cdfd0";
+const char* CHARACTERISTIC_UUID_TX = "a16587d4-584a-4668-b279-6ccb940cdfd1";
+const char* CHARACTERISTIC_UUID_RX = "a16587d4-584a-4668-b279-6ccb940cdfd2";
+const char* CTLVAL1_UUID_RX = "a16587d4-584a-4668-b279-6ccb940cdfd3";
+const char* CTLVAL2_UUID_RX = "a16587d4-584a-4668-b279-6ccb940cdfd4";
+BLEServer* Server = NULL;
+BLECharacteristic *CharTX, *CharRX, *CharCtlVal1, *CharCtlVal2;
+bool dev_connected = false;
+bool last_dev_connected = false;
+String tx_idle = "";
+String tx_drive = "";
+int accel_ctl_left = 0;
+int accel_ctl_right = 0;
 
-static boolean doConnect = false;
-static boolean connected = false;
-static boolean doScan = false;
-
-// Define pointer for the BLE connection
-static BLEAdvertisedDevice* BLEAdvDevice;
-BLERemoteCharacteristic* TelemetryChar;
-BLERemoteCharacteristic* CmdStrChar;
-BLERemoteCharacteristic* CtlVal1Char;
-BLERemoteCharacteristic* CtlVal2Char;
-
-// Variables
-int arm_motor = 0;
-int speed_limit = 230;
-int left_motor = 0;
-int right_motor = 0;
+// Motor setup
+const int offset_motorA = 1;
+const int offset_motorB = 1;
+Motor MotorA_Left = Motor(DRIVER_AIN1, DRIVER_AIN2, DRIVER_PWMA, offset_motorA, DRIVER_STBY);
+Motor MotorB_Right = Motor(DRIVER_BIN1, DRIVER_BIN2, DRIVER_PWMB, offset_motorB, DRIVER_STBY);
 
 // Vehicle controller setup
 const uint8_t MODE_IDLE = 1;
 const uint8_t MODE_DRIVE = 2;
 uint8_t mode = MODE_IDLE;
-double threshold = 2.6;
 
-Adafruit_MPU6050 MPU;
+int speed_limit = 230;
+int arm_motor = false;
 
-// Callback function for Notify function
-static void telemetryNotifyCallback(BLERemoteCharacteristic* pBLERemoteCharacteristic, uint8_t* pData, size_t length, bool isNotify) {
-  if(pBLERemoteCharacteristic->getUUID().toString() == TELEMETRY_CHARUUID.toString()) {
+int left_motor = 0;
+int right_motor = 0;
 
-    // convert received bytes to integer
-    // uint32_t counter = pData[0];
-    // for(int i = 1; i<length; i++) {
-    //   counter = counter | (pData[i] << i*8);
-    // }
+class ServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer* pServer) {
+    dev_connected = true;
+  };
 
-    // print to Serial
-    Serial.println((char*)pData);
-  }
-}
-
-// Callback function that is called whenever a client is connected or disconnected
-class MyClientCallback : public BLEClientCallbacks {
-  void onConnect(BLEClient* pclient) {
-  }
-
-  void onDisconnect(BLEClient* pclient) {
-    connected = false;
-    Serial.println("onDisconnect");
+  void onDisconnect(BLEServer* pServer) {
+    dev_connected = false;
   }
 };
 
-bool connectToServer() {
-  Serial.print("Forming a connection to ");
-  Serial.println(BLEAdvDevice->getAddress().toString().c_str());
-  
-  BLEClient* pClient  = BLEDevice::createClient();
-  Serial.println(" - Created client");
-
-  pClient->setClientCallbacks(new MyClientCallback());
-
-  // Connect to the remove BLE Server.
-  pClient->connect(BLEAdvDevice);  // if you pass BLEAdvertisedDevice instead of address, it will be recognized type of peer device address (public or private)
-  Serial.println(" - Connected to server");
-
-  // Obtain a reference to the service we are after in the remote BLE server.
-  BLERemoteService* pRemoteService = pClient->getService(SERVICE_UUID);
-  if (pRemoteService == nullptr) {
-    Serial.print("Failed to find our service UUID: ");
-    Serial.println(SERVICE_UUID.toString().c_str());
-    pClient->disconnect();
-    return false;
-  }
-  Serial.println(" - Found our service");
-
-  connected = true;
-  TelemetryChar = pRemoteService->getCharacteristic(TELEMETRY_CHARUUID);
-  CmdStrChar = pRemoteService->getCharacteristic(CMDSTR_CHARUUID);
-  if(connectCharacteristic(pRemoteService, TelemetryChar) == false &&
-     connectCharacteristic(pRemoteService, CmdStrChar) == false &&
-     connectCharacteristic(pRemoteService, CtlVal1Char) == false &&
-     connectCharacteristic(pRemoteService, CtlVal2Char) == false) {
-      connected = false;
-  }
-
-  if(connected == false) {
-    pClient-> disconnect();
-    Serial.println("At least one characteristic UUID not found");
-    return false;
-  }
-  return true;
-}
-
-// Function to chech Characteristic
-bool connectCharacteristic(BLERemoteService* pRemoteService, BLERemoteCharacteristic* l_BLERemoteChar) {
-  // Obtain a reference to the characteristic in the service of the remote BLE server.
-  if (l_BLERemoteChar == nullptr) {
-    Serial.print("Failed to find one of the characteristics");
-    Serial.print(l_BLERemoteChar->getUUID().toString().c_str());
-    return false;
-  }
-  Serial.println(" - Found characteristic: " + String(l_BLERemoteChar->getUUID().toString().c_str()));
-
-  if(l_BLERemoteChar->canNotify())
-    l_BLERemoteChar->registerForNotify(telemetryNotifyCallback);
-
-  return true;
-}
-
-// Scan for BLE servers and find the first one that advertises the service we are looking for.
-class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
-  //Called for each advertising BLE server.
-  void onResult(BLEAdvertisedDevice advertisedDevice) {
-    Serial.print("BLE Advertised Device found: ");
-    Serial.println(advertisedDevice.toString().c_str());
-  
-    // We have found a device, let us now see if it contains the service we are looking for.
-    if (advertisedDevice.haveServiceUUID() && advertisedDevice.isAdvertisingService(SERVICE_UUID)) {
-  
-      BLEDevice::getScan()->stop();
-      BLEAdvDevice = new BLEAdvertisedDevice(advertisedDevice);
-      doConnect = true;
-      doScan = true;
-  
-    } // Found our server
-  } // onResult
-}; // MyAdvertisedDeviceCallbacks
-
-void setup(void) {
-  Serial.begin(115200);
-  while (!Serial)
-    delay(10); // will pause Zero, Leonardo, etc until serial console opens
-
-  BLEDevice::init("");
-  // Retrieve a Scanner and set the callback we want to use to be informed when we
-  // have detected a new device.  Specify that we want active scanning and start the
-  // scan to run for 5 seconds.
-  BLEScan* pBLEScan = BLEDevice::getScan();
-  pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
-  pBLEScan->setInterval(1349);
-  pBLEScan->setWindow(449);
-  pBLEScan->setActiveScan(true);
-  pBLEScan->start(5, false);
-
-  // Try to initialize!
-  if (!MPU.begin()) {
-    Serial.println("Failed to find MPU6050 chip");
-    while (1) {
-      delay(10);
+class CommandCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) {
+    std::string rx_value = pCharacteristic->getValue();
+    if (rx_value.length() > 0) {
+      parseCommand(String(rx_value.c_str()));
     }
   }
-  Serial.println("MPU6050 Found!");
+};
 
-  MPU.setAccelerometerRange(MPU6050_RANGE_8_G);
-  Serial.print("Accelerometer range set to: ");
-  switch (MPU.getAccelerometerRange()) {
-  case MPU6050_RANGE_2_G:
-    Serial.println("+-2G");
-    break;
-  case MPU6050_RANGE_4_G:
-    Serial.println("+-4G");
-    break;
-  case MPU6050_RANGE_8_G:
-    Serial.println("+-8G");
-    break;
-  case MPU6050_RANGE_16_G:
-    Serial.println("+-16G");
-    break;
+class AccelXCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) {
+    std::string rx_value = pCharacteristic->getValue();
+    if (rx_value.length() > 0) {
+      accel_ctl_left = atoi(rx_value.c_str());
+    }
   }
+};
 
-  MPU.setGyroRange(MPU6050_RANGE_500_DEG);
-  Serial.print("Gyro range set to: ");
-  switch (MPU.getGyroRange()) {
-  case MPU6050_RANGE_250_DEG:
-    Serial.println("+- 250 deg/s");
-    break;
-  case MPU6050_RANGE_500_DEG:
-    Serial.println("+- 500 deg/s");
-    break;
-  case MPU6050_RANGE_1000_DEG:
-    Serial.println("+- 1000 deg/s");
-    break;
-  case MPU6050_RANGE_2000_DEG:
-    Serial.println("+- 2000 deg/s");
-    break;
+class AccelYCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) {
+    std::string rx_value = pCharacteristic->getValue();
+    if (rx_value.length() > 0) {
+      accel_ctl_right = atoi(rx_value.c_str());
+    }
   }
+};
 
-  MPU.setFilterBandwidth(MPU6050_BAND_5_HZ);
-  Serial.print("Filter bandwidth set to: ");
-  switch (MPU.getFilterBandwidth()) {
-  case MPU6050_BAND_260_HZ:
-    Serial.println("260 Hz");
-    break;
-  case MPU6050_BAND_184_HZ:
-    Serial.println("184 Hz");
-    break;
-  case MPU6050_BAND_94_HZ:
-    Serial.println("94 Hz");
-    break;
-  case MPU6050_BAND_44_HZ:
-    Serial.println("44 Hz");
-    break;
-  case MPU6050_BAND_21_HZ:
-    Serial.println("21 Hz");
-    break;
-  case MPU6050_BAND_10_HZ:
-    Serial.println("10 Hz");
-    break;
-  case MPU6050_BAND_5_HZ:
-    Serial.println("5 Hz");
-    break;
-  }
+void setup() {
 
-  Serial.println("");
-  delay(100);
+  // Initialize serial and pin modes
+  Serial.begin(115200);
+  pinMode(LED, OUTPUT);
+
+  // Load data
+  NVS.begin("gesturebot", false);
+
+  BLEDevice::init("GestureBot");
+
+  // Create the BLE Server
+  Server = BLEDevice::createServer();
+  Server->setCallbacks(new ServerCallbacks());
+  BLEService *Service = Server->createService(SERVICE_UUID);
+
+  // BLEChar for telemetry data
+  CharTX = Service->createCharacteristic(
+    CHARACTERISTIC_UUID_TX,
+    BLECharacteristic::PROPERTY_NOTIFY
+  );
+  CharTX->addDescriptor(new BLE2902());
+
+  // BLEChar for receiving commands
+  CharRX = Service->createCharacteristic(
+    CHARACTERISTIC_UUID_RX,
+    BLECharacteristic::PROPERTY_READ | 
+    BLECharacteristic::PROPERTY_WRITE
+  );
+  CharRX->addDescriptor(new BLE2902());
+
+  // BLEChar for accelerometer X
+  CharCtlVal1 = Service->createCharacteristic(
+    CTLVAL1_UUID_RX,
+    BLECharacteristic::PROPERTY_READ | 
+    BLECharacteristic::PROPERTY_WRITE
+  );
+  CharCtlVal1->addDescriptor(new BLE2902());
+
+  // BLEChar for accelerometer Y
+  CharCtlVal2 = Service->createCharacteristic(
+    CTLVAL2_UUID_RX,
+    BLECharacteristic::PROPERTY_READ | 
+    BLECharacteristic::PROPERTY_WRITE
+  );
+  CharCtlVal2->addDescriptor(new BLE2902());
+  
+  CharRX->setCallbacks(new CommandCallbacks());
+  CharCtlVal1->setCallbacks(new AccelXCallbacks());
+  CharCtlVal2->setCallbacks(new AccelYCallbacks());
+
+  Service->start();
+  Server->getAdvertising()->start();
+  Serial.println("Waiting for a client connection...");
+  digitalWrite(LED, HIGH);
+
+  // Load data
+  speed_limit = NVS.getUShort("speed_limit", 230);
+
 }
 
 void loop() {
 
-  // If the flag "doConnect" is true then we have scanned for and found the desired
-  // BLE Server with which we wish to connect.  Now we connect to it.  Once we are 
-  // connected we set the connected flag to be true.
-  if (doConnect == true) {
-    if (connectToServer()) {
-      Serial.println("We are now connected to the BLE Server.");
-    } else {
-      Serial.println("We have failed to connect to the server; there is nothin more we will do.");
+  // On connect
+  if (dev_connected) {
+
+    if (mode == MODE_DRIVE) {
+      motorDrive(accel_ctl_left, accel_ctl_right);
+      sendTelemetry();
     }
-    doConnect = false;
+
+    if (mode == MODE_IDLE) {
+      // Safe all motors
+      left_motor = 0;
+      right_motor = 0;
+      MotorA_Left.brake();
+      MotorB_Right.brake();
+
+      sendTelemetry();
+
+      delay(500);
+    }
+
   }
 
-  // If we are connected to a peer BLE Server, update the characteristic each time we are reached
-  // with the current time since boot.
-  if (connected) {
-    std::string rxValue = TelemetryChar->readValue();
-    Serial.println(rxValue.c_str());
-    
-    // String txValue = "String with random value from client: " + String(-random(1000));
-    // Serial.println("Characteristic 2 (writeValue): " + txValue);
-    
-    // Set the characteristic's value to be the array of bytes that is actually a string.
-    // CmdStrChar->writeValue(txValue.c_str(), txValue.length());
-    
-  }else if(doScan){
-    BLEDevice::getScan()->start(0);  // this is just example to start scan after disconnect, most likely there is better way to do it in arduino
+  // On disconnect
+  if (!dev_connected && last_dev_connected) {
+
+    // Reset mode and stop motors
+    mode = MODE_IDLE;
+
+    // Give the BLE stack the chance to get things ready and advertise again
+    delay(800);
+    Server->getAdvertising()->start();
+    Serial.println("Advertising again...");
+    last_dev_connected = dev_connected;
+
+    digitalWrite(LED, HIGH);
+
   }
 
-  // In this example "delay" is used to delay with one second. This is of course a very basic 
-  // implementation to keep things simple. I recommend to use millis() for any production code
-  delay(1000);
+  // While connecting
+  if (dev_connected && !last_dev_connected) {
 
+    last_dev_connected = dev_connected;
+    digitalWrite(LED, HIGH);
 
+  }
 
-  // sensors_event_t a, g, temp;
-  // MPU.getEvent(&a, &g, &temp);
+}
 
-  // if (abs(a.acceleration.x) > threshold || abs(a.acceleration.y) > threshold) {
-  //   if (a.acceleration.x < -threshold && a.acceleration.y <= threshold) {
-  //     // forward
-  //   }
-  //   if (a.acceleration.x > threshold && a.acceleration.y <= threshold) {
-  //     // backward
-  //   }
-  //   if (a.acceleration.x <= threshold && a.acceleration.y < -threshold) {
-  //     // left
-  //   }
-  //   if (a.acceleration.x <= threshold && a.acceleration.y > threshold) {
-  //     // right
-  //   }
-  // } else {
-  //   // stop
-  // }
+void parseCommand(String command) {
+  command.trim();
+  if (command.startsWith("mode ")) {
+    String mode_value = command.substring(5);
+    if (mode_value == "drv") {
+      mode = MODE_DRIVE;
+    } else if (mode_value == "id") {
+      mode = MODE_IDLE;
+    } else {
+      Serial.println("Unknown mode: " + mode_value + ". Available modes: id, drv");
+    }
+  } else if (command.startsWith("set sl ")) {
+    String sl = command.substring(7);
+    NVS.putUShort("speed_limit", sl.toInt());
+    speed_limit = sl.toInt();
+  } else if (command.startsWith("arm md")) {
+    arm_motor = 1;
+  } else if (command.startsWith("safe md")) {
+    arm_motor = 0;
+  } else {
+    Serial.println("Unknown command: " + command);
+  }
+}
 
-  // /* Print out the values */
-  // Serial.print("Acceleration X: ");
-  // Serial.print(a.acceleration.x);
-  // Serial.print(", Y: ");
-  // Serial.print(a.acceleration.y);
-  // Serial.print(", Z: ");
-  // Serial.print(a.acceleration.z);
+void sendTelemetry() {
+  if (!dev_connected) return;
+  if (mode == MODE_IDLE)
+  {
+    tx_idle = String(mode) + "," + 
+              String(arm_motor) + "," + 
+              String(speed_limit);
+    CharTX->setValue(tx_idle.c_str());
+    CharTX->notify();
+  } else if (mode == MODE_DRIVE) {
+    tx_drive = String(mode) + "," + 
+               String(arm_motor) + "," + 
+               String(speed_limit) + "," +
+               String(left_motor) + "," +
+               String(right_motor);
+      CharTX->setValue(tx_drive.c_str());
+      CharTX->notify();
+  }
+}
 
-  // Serial.println("");
-  // delay(100);
+void motorDrive(int left, int right) {
+  
+  left_motor = left;
+  right_motor = right;
+  if (arm_motor) {
+    MotorA_Left.drive(left);
+    MotorB_Right.drive(right);
+  } else {
+    MotorA_Left.brake();
+    MotorB_Right.brake();
+  }
+
 }
