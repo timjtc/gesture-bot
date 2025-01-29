@@ -163,6 +163,8 @@ void loop() {
   // On connect
   if (dev_connected) {
 
+    digitalWrite(LED, LOW);
+
     if (mode == MODE_DRIVE) {
       motorDrive(accel_ctl_left, accel_ctl_right);
       sendTelemetry();
