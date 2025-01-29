@@ -191,8 +191,8 @@ void loop() {
     mode = MODE_IDLE;
 
     // Give the BLE stack the chance to get things ready and advertise again
-    delay(500);
-    Server->startAdvertising(); 
+    delay(800);
+    Server->getAdvertising()->start();
     Serial.println("Advertising again...");
     last_dev_connected = dev_connected;
 
